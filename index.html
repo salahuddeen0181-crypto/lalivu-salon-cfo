@@ -404,7 +404,7 @@ function uid(p){return p+Date.now().toString(36)+Math.random().toString(36).slic
 function parseDate(s){s=(s||"").trim(); let m=s.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4}|\d{2})(?!\d)/); if(m){let y=m[3].length===2?('20'+m[3]):m[3]; return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;} m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if(m)return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`; return null;}
 function cleanNum(s){if(s==null)return NaN; s=String(s).replace(/\u00A0/g,'').replace(/\s/g,''); let neg=/^\(.*\)$/.test(s)||/-/.test(s); s=s.replace(/[^\d.,]/g,''); if(s.includes('.')&&s.includes(',')){s=s.replace(/\./g,'').replace(',','.');}else if(s.includes(',')){s=/,\d{1,2}$/.test(s)?s.replace(',','.'):s.replace(/,/g,'');} const n=parseFloat(s); if(isNaN(n))return NaN; return neg?-n:n;}
 function nowYM(){return new Date().toISOString().slice(0,7);}
-function monthsBack(n){const arr=[]; const d=new Date(); d.setDate(1); for(let i=n-1;i>=0;i--){const x=new Date(d); x.setMonth(d.getMonth()-i); arr.push(x.toISOString().slice(0,7));} return arr;}
+function monthsBack(n){const arr=[]; const d=new Date(); const y=d.getUTCFullYear(), mo=d.getUTCMonth(); for(let i=n-1;i>=0;i--){arr.push(new Date(Date.UTC(y,mo-i,1)).toISOString().slice(0,7));} return arr;}
 function monthLabel(p){const[y,m]=p.split('-'); const n=["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"]; return n[+m-1]+" "+y.slice(2);}
 function isPayroll(c){return /^ЗП/i.test(c);}
 
