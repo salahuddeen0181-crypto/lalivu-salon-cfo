@@ -357,7 +357,8 @@ const hasCloud=(typeof window!=='undefined' && window.storage);
 function sbReady(){return !!(sb&&sbUser);}
 function localGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function localSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
-function sbCfg(){try{return JSON.parse(localStorage.getItem('salon2:sbcfg')||'null');}catch(e){return null;}}
+const SB_DEFAULT={url:"https://fkwqqpwbossecszebijy.supabase.co",key:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZrd3FxcHdib3NzZWNzemViaWp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNTA1MzIsImV4cCI6MjA5NzYyNjUzMn0.HHd7YQbtlCGH70UI3UJYGYJwONX1iHH9IjtmKd64af4"};
+function sbCfg(){try{const c=JSON.parse(localStorage.getItem('salon2:sbcfg')||'null'); if(c&&c.url&&c.key)return c;}catch(e){} return (SB_DEFAULT.url&&SB_DEFAULT.key)?SB_DEFAULT:null;}
 function initSb(){const c=sbCfg(); if(c&&c.url&&c.key&&typeof supabase!=='undefined'){try{sb=supabase.createClient(c.url,c.key);}catch(e){sb=null;}}}
 const store={
   async get(k){
