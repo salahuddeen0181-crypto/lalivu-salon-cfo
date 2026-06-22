@@ -77,6 +77,7 @@
       </div>
       <div style="flex:1"></div>
       <div id="periodSwitch" style="display:flex;align-items:center;gap:5px;background:rgba(24,18,14,.7);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:5px"></div>
+      <div id="customRange" style="display:none;align-items:center;gap:6px;background:rgba(24,18,14,.7);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:5px 8px"></div>
       <div id="curSwitch" style="display:flex;align-items:center;gap:4px;background:rgba(24,18,14,.7);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:5px"></div>
       <div style="display:flex;align-items:center;gap:10px;background:rgba(24,18,14,.7);border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:6px 14px 6px 7px">
         <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(140deg,#ff9a52,#e85d1a);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#3a1a08">LV</div>
@@ -106,7 +107,7 @@ const DEF_INCOME=["Услуги салона","Розница (косметик�
 const DEF_EXPENSE=["ЗП мастеров","Аренда","Материалы (косметика)","Маркетинг","ЗП Бухгалтер","ЗП Админов","Налоги","Расходники","Мелкие расходы","Без статьи"];
 const CUR={RUB:"₽",USD:"$",EUR:"€",ARS:"$"};
 const CUR_BTNS=[["RUB","₽"],["USD","$"],["EUR","€"]];
-const PERIOD_BTNS=[["all","Всё время"],["12","1 год"],["6","6 мес"],["3","3 мес"],["month","Текущий"]];
+const PERIOD_BTNS=[["all","Всё время"],["12","1 год"],["6","6 мес"],["3","3 мес"],["month","Текущий"],["custom","Свой"]];
 const INC_PAL=["#46e08a","#34b977","#2a8f5e","#1f6646","#3fc98e","#5bd6a4","#7184a0"];
 const EXP_PAL=["#ff9a52","#f07a35","#e05f3a","#c94e4e","#a8553a","#7a4a33","#9b6b4a","#c98a4e","#8a7d72"];
 
@@ -117,6 +118,8 @@ let state={settings:{salonName:"Lalivu Space",currency:"RUB",
   openings:{"Терминал":0,"Наличные":2700,"Карта":-501},
   avgCheck:0,clients:0,taxRate:6}, tx:[], reports:[], bank:[]};
 let range="6", curOp='income', curLayout=1, curSec='overview', searchQuery='';
+let customFrom='', customTo='';            // свой период (дашборд)
+let opsRange='follow', opsFrom='', opsTo=''; // свой период истории операций
 
 /* ===================== хранилище: Supabase → облако → localStorage ===================== */
 let sb=null, sbUser=null;
@@ -181,13 +184,17 @@ function monthLabel(p){const[y,m]=p.split('-'); const n=["Янв","Фев","Ма
 function monthShort(p){const[y,m]=p.split('-'); const n=["Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"]; return n[+m-1];}
 function isPayroll(c){return /^ЗП/i.test(c);}
 function allMonthsRange(){const ms=[...new Set(state.tx.map(t=>ym(t.date)))].sort(); if(!ms.length)return [nowYM()]; let [y,mo]=ms[0].split('-').map(Number); const now=nowYM(); const arr=[]; let cur=ms[0]; let guard=0; while(cur<=now&&guard<600){arr.push(cur); mo++; if(mo>12){mo=1;y++;} cur=`${y}-${String(mo).padStart(2,'0')}`; guard++;} return arr;}
-function periodMonths(){ if(range==="all")return allMonthsRange(); if(range==="month")return [nowYM()]; return monthsBack(+range); }
-function periodLabel(){const o={"all":"всё время","12":"12 мес","6":"6 мес","3":"3 мес","month":"текущий месяц"}; return o[range]||range;}
+function monthsBetween(a,b){ if(a>b){const t=a;a=b;b=t;} const arr=[]; let [y,mo]=a.split('-').map(Number); let cur=a, g=0; while(cur<=b&&g<600){arr.push(cur); mo++; if(mo>12){mo=1;y++;} cur=`${y}-${String(mo).padStart(2,'0')}`; g++;} return arr.length?arr:[a]; }
+function defaultCustom(){ const now=new Date(); const to=now.toISOString().slice(0,10); const from=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)).toISOString().slice(0,10); return {from,to}; }
+function fmtDM(d){return d?d.slice(8,10)+'.'+d.slice(5,7)+'.'+d.slice(0,4):'';}
+function periodMonths(){ if(range==="custom"){const f=customFrom||defaultCustom().from, t=customTo||defaultCustom().to; return monthsBetween(ym(f),ym(t));} if(range==="all")return allMonthsRange(); if(range==="month")return [nowYM()]; return monthsBack(+range); }
+function dateInPeriod(d){ if(range==="custom"){ if(customFrom&&d<customFrom)return false; if(customTo&&d>customTo)return false; return true; } return periodMonths().includes(ym(d)); }
+function opsDateInPeriod(d){ if(opsRange==='follow')return dateInPeriod(d); if(opsRange==='custom'){ if(opsFrom&&d<opsFrom)return false; if(opsTo&&d>opsTo)return false; return true; } if(opsRange==='all')return true; if(opsRange==='month')return ym(d)===nowYM(); return monthsBack(+opsRange).includes(ym(d)); }
+function periodLabel(){ if(range==="custom")return (customFrom||customTo)?`${fmtDM(customFrom)} – ${fmtDM(customTo)}`:'свой период'; const o={"all":"всё время","12":"12 мес","6":"6 мес","3":"3 мес","month":"текущий месяц"}; return o[range]||range;}
 
 /* ===================== метрики ===================== */
-function metrics(months){
-  months=months||periodMonths();
-  const tx=state.tx.filter(t=>months.includes(ym(t.date)));
+function metrics(){
+  const tx=state.tx.filter(t=>dateInPeriod(t.date));
   const inc=tx.filter(t=>t.type==='income'), exp=tx.filter(t=>t.type==='expense');
   const rev=inc.reduce((a,t)=>a+t.amount,0), spend=exp.reduce((a,t)=>a+t.amount,0);
   const net=rev-spend;
@@ -227,12 +234,11 @@ function trendBadge(curr,prev,goodUp){
 
 /* ===================== сверка ===================== */
 function reconcile(){
-  const months=periodMonths();
-  const reps=state.reports.filter(r=>months.includes(ym(r.date)));
+  const reps=state.reports.filter(r=>dateInPeriod(r.date));
   let expected=[];
   reps.forEach(r=>{ if(r.card>0)expected.push({date:r.date,ch:'Безнал',amount:r.card,who:r.who,used:false});
                     if(r.cash>0)expected.push({date:r.date,ch:'Наличные',amount:r.cash,who:r.who,used:false}); });
-  let credits=state.bank.filter(b=>months.includes(ym(b.date))&&b.amount>0).map(b=>({...b,used:false}));
+  let credits=state.bank.filter(b=>dateInPeriod(b.date)&&b.amount>0).map(b=>({...b,used:false}));
   const matches=[];
   function match(exp,feeLow){let best=-1,bd=Infinity;
     credits.forEach((c,i)=>{if(c.used)return; const dd=(new Date(c.date)-new Date(exp.date))/86400000; if(dd<-1||dd>5)return; if(c.amount>exp.amount*1.01)return; if(c.amount<exp.amount*(1-feeLow))return; const diff=Math.abs(exp.amount-c.amount); if(diff<bd){bd=diff;best=i;}});
@@ -301,8 +307,7 @@ function structBars(obj,pal,opts){
 function opBadge(t){return t.type==='income'?{c:'#46e08a',bg:'rgba(70,224,138,.16)'}:t.type==='transfer'?{c:'#9bb0ff',bg:'rgba(155,176,255,.16)'}:{c:'#ff6b5e',bg:'rgba(255,107,94,.16)'};}
 function opInitials(t){const s=(t.type==='transfer'?'⇄':(t.note||t.cat||'?')); return s.trim().slice(0,2).toUpperCase();}
 function recentOpsHTML(limit){
-  const months=periodMonths();
-  const tx=state.tx.filter(t=>months.includes(ym(t.date))).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,limit||5);
+  const tx=state.tx.filter(t=>dateInPeriod(t.date)).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,limit||5);
   if(!tx.length)return `<div style="color:#6f6359;font-size:13px;padding:12px 0">Пока нет операций за период.</div>`;
   return tx.map(t=>{const b=opBadge(t); const title=t.type==='transfer'?(t.from+' → '+t.to):t.cat;
     const sub=(t.type==='transfer'?'Перевод':t.account)+(t.note?(' · '+t.note):'');
@@ -341,12 +346,12 @@ function derived(m){
 
 /* ===================== ОБЗОР ===================== */
 function renderOverview(){
-  const months=periodMonths(); const m=metrics(months); const d=derived(m);
+  const m=metrics(); const d=derived(m);
   const b=accountBalances(); const bal=totalBalance();
   const pm=periodMonths(); const lastM=pm[pm.length-1], prevM=pm[pm.length-2];
   const cur=monthMetric(lastM), prev=prevM?monthMetric(prevM):{rev:0,exp:0,net:0};
   const kpiTrendRev=trendBadge(cur.rev,prev.rev,true), kpiTrendExp=trendBadge(cur.exp,prev.exp,false), kpiTrendNet=trendBadge(cur.net,prev.net,true);
-  const chartMonths=range==="all"?allMonthsRange():monthsBack(range==="month"?6:Math.max(6,+range));
+  const chartMonths=range==="custom"?periodMonths():range==="all"?allMonthsRange():monthsBack(range==="month"?6:Math.max(6,+range));
 
   const kpis=`<div class="gridcols" style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px">
     <div class="kpi"><div style="font-size:12.5px;color:#8a7d72;font-weight:600">Выручка · ${periodLabel()}</div><div class="disp" style="font-size:25px;font-weight:700;margin-top:7px">${money(m.rev)}</div>${kpiTrendRev}</div>
@@ -422,7 +427,7 @@ function renderOverview(){
 
 /* ===================== ОПЕРАЦИИ ===================== */
 function renderOps(){
-  const months=periodMonths(); const m=metrics(months);
+  const m=metrics();
   const cats=curOp==='income'?INCOME:EXPENSE;
   const typeBtns=[['income','Поступление','#46e08a'],['expense','Расход','#ff6b5e'],['transfer','Между счетами','#9bb0ff']]
     .map(([k,l,c])=>`<button data-optype="${k}" style="flex:1;border:1px solid ${curOp===k?c:'rgba(255,255,255,.08)'};border-radius:12px;padding:11px;font-size:13.5px;font-weight:700;cursor:pointer;transition:.15s;${curOp===k?'background:'+c+'22;color:'+c:'background:transparent;color:#9b8d82'}">${l}</button>`).join('');
@@ -440,8 +445,12 @@ function renderOps(){
   formInner+=`<input id="o_note" placeholder="Комментарий (необязательно)" class="inp" style="margin-bottom:16px">
     <button id="o_add" style="width:100%;border:none;border-radius:14px;padding:15px;background:${curOp==='expense'?'linear-gradient(135deg,#ff6b5e,#e0432f)':'linear-gradient(135deg,#ff9a52,#e85d1a)'};color:#fff;font-weight:700;font-size:15px;cursor:pointer;box-shadow:0 8px 22px rgba(232,93,26,.4)">Добавить операцию</button>`;
 
-  const tx=state.tx.filter(t=>months.includes(ym(t.date))).sort((a,b)=>b.date.localeCompare(a.date))
+  const tx=state.tx.filter(t=>opsDateInPeriod(t.date)).sort((a,b)=>b.date.localeCompare(a.date))
     .filter(t=>{if(!searchQuery)return true; const q=searchQuery.toLowerCase(); return [(t.cat||''),(t.account||''),(t.from||''),(t.to||''),(t.note||'')].join(' ').toLowerCase().includes(q);});
+  const otxRev=tx.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0), otxExp=tx.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0);
+  const opsOpts=[['follow','как на дашборде'],['all','всё время'],['12','12 мес'],['6','6 мес'],['3','3 мес'],['month','текущий месяц'],['custom','свой период…']];
+  const opsSel=`<select id="opsRangeSel" class="inp" style="width:auto;padding:7px 10px;font-size:12.5px">${opsOpts.map(([k,l])=>`<option value="${k}" ${opsRange===k?'selected':''}>${l}</option>`).join('')}</select>`;
+  const opsCustom=opsRange==='custom'?`<input type="date" id="opsFrom" value="${opsFrom}" class="inp" style="width:auto;padding:7px 9px;font-size:12.5px"><span class="msg">–</span><input type="date" id="opsTo" value="${opsTo}" class="inp" style="width:auto;padding:7px 9px;font-size:12.5px">`:'';
   const head=`<div style="display:grid;grid-template-columns:64px 120px 1fr 110px 1.3fr 130px 30px;gap:10px;padding:12px 6px;font-size:11.5px;color:#6f6359;font-weight:700;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid rgba(255,255,255,.06)"><div>Дата</div><div>Тип</div><div>Статья</div><div>Счёт</div><div>Коммент.</div><div style="text-align:right">Сумма</div><div></div></div>`;
   const rows=tx.length?tx.slice(0,300).map(t=>{const bd=opBadge(t); const sg=t.type==='income'?'+':t.type==='transfer'?'':'−'; const tlabel=t.type==='income'?'доход':t.type==='expense'?'расход':'перевод';
     return `<div style="display:grid;grid-template-columns:64px 120px 1fr 110px 1.3fr 130px 30px;gap:10px;padding:13px 6px;font-size:13.5px;align-items:center;border-bottom:1px solid rgba(255,255,255,.04)">
@@ -460,7 +469,7 @@ function renderOps(){
       <div class="card"><div class="ttl">Откуда доход</div><div class="sub" style="margin-bottom:18px">Структура поступлений за период</div>${structBars(m.byInc,INC_PAL,{limit:5})}</div>
       <div class="card"><div class="ttl">Куда уходят деньги</div><div class="sub" style="margin-bottom:18px">Топ статей расходов за период</div>${structBars(m.byExp,EXP_PAL,{limit:6})}</div>
     </div>
-    <div class="card"><div style="display:flex;align-items:center;margin-bottom:8px"><span class="ttl">Операции за период</span><div style="flex:1"></div><span class="msg">${tx.length} шт · доход ${money(m.rev)} · расход ${money(m.spend)}</span></div>${head}${rows}</div>
+    <div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap"><span class="ttl">История операций</span><span class="msg">показывать:</span>${opsSel}${opsCustom}<div style="flex:1"></div><span class="msg">${tx.length} шт · доход ${money(otxRev)} · расход ${money(otxExp)}</span></div>${head}${rows}</div>
     <div class="card" style="margin-top:18px">
       <div style="display:flex;align-items:center;margin-bottom:6px"><span class="ttl">Загрузить пачкой / из файла</span><div style="flex:1"></div>
         <label class="gbtn" style="cursor:pointer;margin-right:8px">📄 Excel / CSV<input type="file" id="bulkFile" accept=".xlsx,.xls,.csv,.txt,.tsv" hidden></label>
@@ -475,6 +484,9 @@ function renderOps(){
   bindOpsForm();
 }
 function bindOpsForm(){
+  const ors=document.getElementById('opsRangeSel'); if(ors)ors.onchange=e=>{opsRange=e.target.value; if(opsRange==='custom'&&!opsFrom){const dc=defaultCustom();opsFrom=dc.from;opsTo=dc.to;} renderOps();};
+  const ofr=document.getElementById('opsFrom'); if(ofr)ofr.onchange=e=>{opsFrom=e.target.value;renderOps();};
+  const oto=document.getElementById('opsTo'); if(oto)oto.onchange=e=>{opsTo=e.target.value;renderOps();};
   const add=document.getElementById('o_add'); if(!add)return;
   add.onclick=()=>{const amount=cleanNum(document.getElementById('o_amt').value); if(!amount)return;
     const date=document.getElementById('o_date').value, note=(document.getElementById('o_note').value||'').trim();
@@ -916,8 +928,17 @@ function download(name,text,mime){const blob=new Blob([text],{type:mime||'text/p
 function renderHeaderBits(){
   document.getElementById('periodSwitch').innerHTML=PERIOD_BTNS.map(([k,l])=>`<button data-period="${k}" style="border:none;border-radius:10px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;${range===k?'background:rgba(255,255,255,.1);color:#f4ede7':'background:transparent;color:#8a7d72'}">${l}</button>`).join('');
   document.getElementById('curSwitch').innerHTML=CUR_BTNS.map(([k,sm])=>`<button data-cur="${k}" style="border:none;border-radius:9px;padding:7px 12px;font-size:14px;font-weight:700;cursor:pointer;${state.settings.currency===k?'background:linear-gradient(135deg,#ff9a52,#e85d1a);color:#fff':'background:transparent;color:#9b8d82'}">${sm}</button>`).join('');
+  renderCustomRange();
   document.getElementById('chipName').textContent='Салон «'+(state.settings.salonName||'Lalivu')+'»';
   const dot=document.getElementById('syncDot'); if(dot){dot.style.background=sbReady()?'#46e08a':(hasCloud?'#9bb0ff':'#8a7d72'); dot.title=sbReady()?('Supabase · '+(sbUser.email||'')):(hasCloud?'облако Claude':'localStorage');}
+}
+function renderCustomRange(){
+  const box=document.getElementById('customRange'); if(!box)return;
+  if(range!=='custom'){box.style.display='none'; box.innerHTML=''; return;}
+  box.style.display='flex';
+  box.innerHTML=`<span style="font-size:12px;color:#8a7d72">с</span><input type="date" id="cFrom" value="${customFrom}" style="background:transparent;border:none;outline:none;color:#f4ede7;font-size:12.5px;color-scheme:dark"><span style="font-size:12px;color:#8a7d72">по</span><input type="date" id="cTo" value="${customTo}" style="background:transparent;border:none;outline:none;color:#f4ede7;font-size:12.5px;color-scheme:dark">`;
+  document.getElementById('cFrom').onchange=e=>{customFrom=e.target.value;renderAll();};
+  document.getElementById('cTo').onchange=e=>{customTo=e.target.value;renderAll();};
 }
 function renderAll(){
   renderHeaderBits();
@@ -932,7 +953,7 @@ function showSec(sec){
 /* ===================== bind ===================== */
 function bind(){
   document.querySelector('.sidebar').addEventListener('click',e=>{const btn=e.target.closest('.navbtn'); if(btn&&btn.dataset.sec)showSec(btn.dataset.sec);});
-  document.getElementById('periodSwitch').addEventListener('click',e=>{const b=e.target.closest('button'); if(b&&b.dataset.period){range=b.dataset.period;renderAll();}});
+  document.getElementById('periodSwitch').addEventListener('click',e=>{const b=e.target.closest('button'); if(b&&b.dataset.period){range=b.dataset.period; if(range==='custom'&&!customFrom){const dc=defaultCustom();customFrom=dc.from;customTo=dc.to;} renderAll();}});
   document.getElementById('curSwitch').addEventListener('click',e=>{const b=e.target.closest('button'); if(b&&b.dataset.cur){state.settings.currency=b.dataset.cur;save();renderAll();}});
   const sbx=document.getElementById('searchBox'); if(sbx)sbx.addEventListener('input',e=>{searchQuery=e.target.value;renderOps();});
   document.querySelector('main.content').addEventListener('click',e=>{
