@@ -65,6 +65,7 @@
     <button class="navbtn" data-sec="salary" title="Зарплаты"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="6" width="18" height="13" rx="2.5" stroke="currentColor" stroke-width="1.7"/><path d="M3 10h18" stroke="currentColor" stroke-width="1.7"/><circle cx="16.5" cy="14.5" r="1.6" fill="currentColor"/></svg></button>
     <button class="navbtn" data-sec="recon" title="Сверка с банком"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 21V9l8-5 8 5v12M9 21v-6h6v6" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></button>
     <button class="navbtn" data-sec="cfo" title="Где деньги"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+    <button class="navbtn" data-sec="reports" title="Отчёты"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M7 3h7l5 5v13H7z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M13 3v6h6M9.5 13h6M9.5 16.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
     <div style="flex:1"></div>
     <button class="navbtn" data-sec="settings" title="Настройки"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.4 5.6l-2 2M7.6 16.4l-2 2M18.4 18.4l-2-2M7.6 7.6l-2-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
   </aside>
@@ -95,6 +96,7 @@
       <div class="view" id="view-salary"></div>
       <div class="view" id="view-recon"></div>
       <div class="view" id="view-cfo"></div>
+      <div class="view" id="view-reports"></div>
       <div class="view" id="view-settings"></div>
     </main>
   </div>
@@ -116,10 +118,13 @@ let ACCOUNTS=DEF_ACCOUNTS.slice(), INCOME=DEF_INCOME.slice(), EXPENSE=DEF_EXPENS
 let state={settings:{salonName:"Lalivu Space",currency:"RUB",
   accounts:DEF_ACCOUNTS.slice(),incomeCats:DEF_INCOME.slice(),expenseCats:DEF_EXPENSE.slice(),
   openings:{"Терминал":0,"Наличные":2700,"Карта":-501},
+  encashCats:["Инкассация"], staffRules:[],
   avgCheck:0,clients:0,taxRate:6}, tx:[], reports:[], bank:[]};
 let range="6", curOp='income', curLayout=1, curSec='overview', searchQuery='';
 let customFrom='', customTo='';            // свой период (дашборд)
 let opsRange='follow', opsFrom='', opsTo=''; // свой период истории операций
+let encRange='all', encFrom='', encTo='';  // свой период блока инкассации (Отчёты)
+let reportCat=null, reportType='expense';  // выбранная статья для drill-down отчёта
 
 /* ===================== хранилище: Supabase → облако → localStorage ===================== */
 let sb=null, sbUser=null;
@@ -148,6 +153,8 @@ function syncRefs(){
   if(!Array.isArray(s.incomeCats)||!s.incomeCats.length)s.incomeCats=DEF_INCOME.slice();
   if(!Array.isArray(s.expenseCats)||!s.expenseCats.length)s.expenseCats=DEF_EXPENSE.slice();
   if(!s.openings)s.openings={};
+  if(!Array.isArray(s.encashCats)||!s.encashCats.length)s.encashCats=["Инкассация"];
+  if(!Array.isArray(s.staffRules))s.staffRules=[];
   if(s.avgCheck==null)s.avgCheck=0; if(s.clients==null)s.clients=0; if(s.taxRate==null)s.taxRate=6;
   ACCOUNTS=s.accounts; INCOME=s.incomeCats; EXPENSE=s.expenseCats;
 }
@@ -183,6 +190,28 @@ function monthsBack(n){const arr=[]; const d=new Date(); const y=d.getUTCFullYea
 function monthLabel(p){const[y,m]=p.split('-'); const n=["Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"]; return n[+m-1]+" "+y.slice(2);}
 function monthShort(p){const[y,m]=p.split('-'); const n=["Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"]; return n[+m-1];}
 function isPayroll(c){return /^ЗП/i.test(c);}
+function isEncash(c){c=c||''; if((state.settings.encashCats||[]).some(x=>x&&x.toLowerCase()===c.toLowerCase()))return true; return /инкасс?ац/i.test(c);}
+function isTransferCat(c){return /перевод|между\s*счет/i.test(c||'');}
+/* предикат периода: rk = follow|all|month|custom|N(мес) */
+function mkPred(rk,from,to){
+  if(rk==='all')return ()=>true;
+  if(rk==='month')return d=>ym(d)===nowYM();
+  if(rk==='custom')return d=>{ if(from&&d<from)return false; if(to&&d>to)return false; return true; };
+  const ms=monthsBack(+rk||6); return d=>ms.includes(ym(d));
+}
+/* база и сумма зарплаты по правилу сотрудника за заданные метрики периода */
+function ruleBaseAmount(rule,m){
+  const b=rule.base||'revenue';
+  if(b==='revenue')return m.rev;
+  if(b==='services')return m.byInc['Услуги салона']||0;
+  if(b==='cosmetics')return (m.byInc['Продажа косметики']||m.byInc['Розница (косметика)']||0);
+  if(b==='profit')return Math.max(0,m.net);
+  if(b.indexOf('cat:')===0)return m.byInc[b.slice(4)]||0;
+  return m.rev;
+}
+function ruleAmount(rule,m){ return rule.mode==='fixed'?Math.round(+rule.fixed||0):Math.round(ruleBaseAmount(rule,m)*((+rule.percent||0)/100)); }
+function ruleCat(rule){ return rule.cat || ('ЗП '+(rule.name||'сотрудник')); }
+function baseLabel(b){ if(b==='revenue')return 'вся выручка'; if(b==='services')return 'услуги салона'; if(b==='cosmetics')return 'продажа косметики'; if(b==='profit')return 'чистая прибыль'; if(b&&b.indexOf('cat:')===0)return b.slice(4); return 'вся выручка'; }
 function allMonthsRange(){const ms=[...new Set(state.tx.map(t=>ym(t.date)))].sort(); if(!ms.length)return [nowYM()]; let [y,mo]=ms[0].split('-').map(Number); const now=nowYM(); const arr=[]; let cur=ms[0]; let guard=0; while(cur<=now&&guard<600){arr.push(cur); mo++; if(mo>12){mo=1;y++;} cur=`${y}-${String(mo).padStart(2,'0')}`; guard++;} return arr;}
 function monthsBetween(a,b){ if(a>b){const t=a;a=b;b=t;} const arr=[]; let [y,mo]=a.split('-').map(Number); let cur=a, g=0; while(cur<=b&&g<600){arr.push(cur); mo++; if(mo>12){mo=1;y++;} cur=`${y}-${String(mo).padStart(2,'0')}`; g++;} return arr.length?arr:[a]; }
 function defaultCustom(){ const now=new Date(); const to=now.toISOString().slice(0,10); const from=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)).toISOString().slice(0,10); return {from,to}; }
@@ -193,18 +222,25 @@ function opsDateInPeriod(d){ if(opsRange==='follow')return dateInPeriod(d); if(o
 function periodLabel(){ if(range==="custom")return (customFrom||customTo)?`${fmtDM(customFrom)} – ${fmtDM(customTo)}`:'свой период'; const o={"all":"всё время","12":"12 мес","6":"6 мес","3":"3 мес","month":"текущий месяц"}; return o[range]||range;}
 
 /* ===================== метрики ===================== */
-function metrics(){
-  const tx=state.tx.filter(t=>dateInPeriod(t.date));
-  const inc=tx.filter(t=>t.type==='income'), exp=tx.filter(t=>t.type==='expense');
+function computeMetrics(pred){
+  const tx=state.tx.filter(t=>pred(t.date));
+  // инкассация (вывод средств) считается отдельно — не доход и не расход P&L
+  const inc=tx.filter(t=>t.type==='income'&&!isEncash(t.cat));
+  const exp=tx.filter(t=>t.type==='expense'&&!isEncash(t.cat));
+  const encTx=tx.filter(t=>isEncash(t.cat));
   const rev=inc.reduce((a,t)=>a+t.amount,0), spend=exp.reduce((a,t)=>a+t.amount,0);
   const net=rev-spend;
+  const encOut=encTx.filter(t=>t.type==='expense').reduce((a,t)=>a+t.amount,0); // выведено
+  const encIn=encTx.filter(t=>t.type==='income').reduce((a,t)=>a+t.amount,0);    // внесено обратно
+  const encash=encOut-encIn;
   const byInc={}, byExp={}, byStaff={};
   inc.forEach(t=>byInc[t.cat]=(byInc[t.cat]||0)+t.amount);
   exp.forEach(t=>{byExp[t.cat]=(byExp[t.cat]||0)+t.amount; if(isPayroll(t.cat))byStaff[t.cat]=(byStaff[t.cat]||0)+t.amount;});
   const fot=Object.values(byStaff).reduce((a,b)=>a+b,0);
-  return {tx,inc,exp,rev,spend,net,byInc,byExp,byStaff,fot};
+  return {tx,inc,exp,encTx,rev,spend,net,encash,encOut,encIn,byInc,byExp,byStaff,fot};
 }
-function monthMetric(m){const t=state.tx.filter(x=>ym(x.date)===m); const rev=t.filter(x=>x.type==='income').reduce((a,x)=>a+x.amount,0); const exp=t.filter(x=>x.type==='expense').reduce((a,x)=>a+x.amount,0); return {rev,exp,net:rev-exp};}
+function metrics(){ return computeMetrics(dateInPeriod); }
+function monthMetric(m){const t=state.tx.filter(x=>ym(x.date)===m&&!isEncash(x.cat)); const rev=t.filter(x=>x.type==='income').reduce((a,x)=>a+x.amount,0); const exp=t.filter(x=>x.type==='expense').reduce((a,x)=>a+x.amount,0); return {rev,exp,net:rev-exp};}
 function accountBalances(){
   const bal={}; ACCOUNTS.forEach(a=>bal[a]=(state.settings.openings&&state.settings.openings[a])||0);
   state.tx.forEach(t=>{
@@ -298,11 +334,12 @@ function structBars(obj,pal,opts){
   if(!ent.length)return `<div style="color:#6f6359;font-size:13px;padding:8px 0">Нет данных за период.</div>`;
   const total=ent.reduce((a,e)=>a+e[1],0);
   return ent.map((e,i)=>{const p=Math.round(e[1]/total*100); const col=pal[i%pal.length];
-    return `<div style="margin-bottom:13px"><div style="display:flex;align-items:center;font-size:13.5px;margin-bottom:6px">
+    const clk=opts.type?` data-cat="${esc(e[0])}" data-cattype="${opts.type}" style="cursor:pointer"`:'';
+    return `<div${clk}><div style="margin-bottom:13px"><div style="display:flex;align-items:center;font-size:13.5px;margin-bottom:6px">
       <span style="width:9px;height:9px;border-radius:50%;background:${col};margin-right:9px"></span>
       <span style="font-weight:600">${esc(e[0])}</span><div style="flex:1"></div>
       ${opts.amount!==false?`<span style="color:#c4b6aa">${money(e[1])}</span>`:''}<span style="color:#6f6359;font-size:12px;margin-left:8px">${p}%</span></div>
-      <div style="height:8px;border-radius:5px;background:rgba(255,255,255,.05);overflow:hidden"><div style="height:100%;border-radius:5px;background:${col};width:${p}%"></div></div></div>`;}).join('');
+      <div style="height:8px;border-radius:5px;background:rgba(255,255,255,.05);overflow:hidden"><div style="height:100%;border-radius:5px;background:${col};width:${p}%"></div></div></div></div>`;}).join('');
 }
 function opBadge(t){return t.type==='income'?{c:'#46e08a',bg:'rgba(70,224,138,.16)'}:t.type==='transfer'?{c:'#9bb0ff',bg:'rgba(155,176,255,.16)'}:{c:'#ff6b5e',bg:'rgba(255,107,94,.16)'};}
 function opInitials(t){const s=(t.type==='transfer'?'⇄':(t.note||t.cat||'?')); return s.trim().slice(0,2).toUpperCase();}
@@ -375,7 +412,8 @@ function renderOverview(){
       <div style="flex:1"></div></div>
     ${capChartHTML(chartMonths,h,232)}
     <div style="display:flex;align-items:center;gap:20px;margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,.05);font-size:12.5px;color:#8a7d72">
-      <span>Чистыми за период <b style="color:#f4ede7">${m.net>=0?'+':''}${money(m.net)}</b></span><div style="flex:1"></div>
+      <span>Прибыль <b style="color:#f4ede7">${m.net>=0?'+':''}${money(m.net)}</b></span>
+      ${m.encash?`<span style="margin-left:16px">Выведено <b style="color:#ffb27a">${money(m.encash)}</b></span><span style="margin-left:16px">Δ денег <b style="color:#f4ede7">${money(m.net-m.encash)}</b></span>`:''}<div style="flex:1"></div>
       <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:10px;height:10px;border-radius:3px;background:#ffd9bf"></span>Остаток</span></div></div>`;
 
   const incExpCard=`<div class="card">
@@ -400,8 +438,8 @@ function renderOverview(){
       <button data-go="ops" style="flex:1;border:none;border-radius:13px;padding:12px;background:#fff;color:#1a120c;font-weight:700;font-size:13px;cursor:pointer">↗ Перевод</button></div></div>`;
 
   const recentCard=`<div class="card" style="padding:22px"><div style="display:flex;align-items:center;margin-bottom:4px"><span style="font-size:16px;font-weight:700">Последние операции</span><div style="flex:1"></div><button data-go="ops" style="background:none;border:none;color:#ff9a52;font-size:13px;font-weight:700;cursor:pointer">Все →</button></div>${recentOpsHTML(6)}</div>`;
-  const incStructCard=`<div class="card"><div class="ttl" style="margin-bottom:16px">Откуда доход</div>${structBars(m.byInc,INC_PAL,{limit:5})}</div>`;
-  const expStructCard=`<div class="card"><div class="ttl" style="margin-bottom:16px">Куда уходят деньги</div>${structBars(m.byExp,EXP_PAL,{limit:6})}</div>`;
+  const incStructCard=`<div class="card"><div class="ttl" style="margin-bottom:16px">Откуда доход</div>${structBars(m.byInc,INC_PAL,{limit:5,type:'income'})}</div>`;
+  const expStructCard=`<div class="card"><div class="ttl" style="margin-bottom:16px">Куда уходят деньги</div>${structBars(m.byExp,EXP_PAL,{limit:6,type:'expense'})}</div>`;
 
   let body='';
   if(curLayout===1){
@@ -436,7 +474,8 @@ function renderOps(){
     <div style="display:flex;gap:10px;margin-bottom:14px"><div style="flex:1"><label class="msg" style="font-weight:600">Дата</label><input type="date" id="o_date" value="${today}" class="inp" style="margin-top:6px"></div>
     <div style="flex:1"><label class="msg" style="font-weight:600">Сумма, ${sym()}</label><input id="o_amt" inputmode="decimal" placeholder="0" class="inp disp" style="margin-top:6px;font-size:20px;font-weight:700"></div></div>`;
   if(curOp!=='transfer'){
-    formInner+=`<label class="msg" style="font-weight:600">Статья</label><select id="o_cat" class="inp" style="margin-top:6px;margin-bottom:14px">${cats.map(c=>`<option style="background:#1a120c">${esc(c)}</option>`).join('')}</select>
+    formInner+=`<label class="msg" style="font-weight:600">Статья</label><select id="o_cat" class="inp" style="margin-top:6px">${cats.map(c=>`<option style="background:#1a120c">${esc(c)}</option>`).join('')}</select>
+      <div style="display:flex;gap:8px;margin:8px 0 14px"><input id="o_newcat" class="inp" style="flex:1;padding:9px 11px;font-size:13px" placeholder="+ новая статья ${curOp==='income'?'дохода':'расхода'}"><button id="o_addcat" class="gbtn" style="padding:0 16px">Добавить</button></div>
       <label class="msg" style="font-weight:600">Счёт</label><select id="o_acc" class="inp" style="margin-top:6px;margin-bottom:14px">${ACCOUNTS.map(a=>`<option style="background:#1a120c">${esc(a)}</option>`).join('')}</select>`;
   }else{
     formInner+=`<label class="msg" style="font-weight:600">Счёт <span style="color:#9bb0ff">(откуда)</span></label><select id="o_from" class="inp" style="margin-top:6px;margin-bottom:14px">${ACCOUNTS.map(a=>`<option style="background:#1a120c">${esc(a)}</option>`).join('')}</select>
@@ -466,8 +505,8 @@ function renderOps(){
     <div style="margin-bottom:18px"><div class="h1">Операции</div><div class="sub">Поступления, расходы и переводы между счетами — то, что вносит админ</div></div>
     <div class="gridcols" style="display:grid;grid-template-columns:.95fr 1fr 1fr;gap:18px;margin-bottom:18px;align-items:start">
       <div class="card"><div class="ttl" style="margin-bottom:16px">Добавить операцию</div>${formInner}</div>
-      <div class="card"><div class="ttl">Откуда доход</div><div class="sub" style="margin-bottom:18px">Структура поступлений за период</div>${structBars(m.byInc,INC_PAL,{limit:5})}</div>
-      <div class="card"><div class="ttl">Куда уходят деньги</div><div class="sub" style="margin-bottom:18px">Топ статей расходов за период</div>${structBars(m.byExp,EXP_PAL,{limit:6})}</div>
+      <div class="card"><div class="ttl">Откуда доход</div><div class="sub" style="margin-bottom:18px">Структура поступлений за период · клик — отчёт</div>${structBars(m.byInc,INC_PAL,{limit:5,type:'income'})}</div>
+      <div class="card"><div class="ttl">Куда уходят деньги</div><div class="sub" style="margin-bottom:18px">Топ статей расходов за период · клик — отчёт</div>${structBars(m.byExp,EXP_PAL,{limit:6,type:'expense'})}</div>
     </div>
     <div class="card"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap"><span class="ttl">История операций</span><span class="msg">показывать:</span>${opsSel}${opsCustom}<div style="flex:1"></div><span class="msg">${tx.length} шт · доход ${money(otxRev)} · расход ${money(otxExp)}</span></div>${head}${rows}</div>
     <div class="card" style="margin-top:18px">
@@ -493,10 +532,12 @@ function bindOpsForm(){
     if(curOp==='transfer') state.tx.push({id:uid('t'),type:'transfer',date,amount:Math.abs(amount),from:document.getElementById('o_from').value,to:document.getElementById('o_to').value,note});
     else state.tx.push({id:uid('t'),type:curOp,date,amount:Math.abs(amount),cat:document.getElementById('o_cat').value,account:document.getElementById('o_acc').value,note});
     save(); renderAll();};
+  const ac=document.getElementById('o_addcat');
+  if(ac)ac.onclick=()=>{const inp=document.getElementById('o_newcat'); const n=(inp&&inp.value||'').trim(); if(!n)return; const arr=curOp==='income'?state.settings.incomeCats:state.settings.expenseCats; if(!arr.includes(n))arr.push(n); syncRefs(); save(); renderOps(); const sel=document.getElementById('o_cat'); if(sel)sel.value=n;};
   const bulkAdd=document.getElementById('bulkAdd');
   if(bulkAdd)bulkAdd.onclick=()=>{const r=parseTxBulk(document.getElementById('bulk').value);save();renderAll();const mm=document.getElementById('bulkMsg'); if(mm)mm.textContent=`Добавлено: ${r.ok}${r.bad?`, не распознано: ${r.bad}`:''}`;};
   const bf=document.getElementById('bulkFile');
-  if(bf)bf.onchange=e=>{const f=e.target.files[0]; if(!f)return; const mm=document.getElementById('bulkMsg'); if(mm)mm.textContent='Читаю файл…'; readFileToGrid(f,(grid,err)=>{ if(err||!grid){if(mm)mm.textContent=err||'Не удалось прочитать файл.';return;} if(mm)mm.textContent=''; if(isDailyReport(grid))startDailyReport(grid); else startMapping(grid);}); e.target.value='';};
+  if(bf)bf.onchange=e=>{const f=e.target.files[0]; if(!f)return; const mm=document.getElementById('bulkMsg'); if(mm)mm.textContent='Читаю файл…'; readFileToGrid(f,(grid,err)=>{ if(err||!grid){if(mm)mm.textContent=err||'Не удалось прочитать файл.';return;} if(mm)mm.textContent=''; if(isDailyReport(grid))startDailyReport(grid); else if(isLedger(grid))startLedger(grid); else startMapping(grid);}); e.target.value='';};
   const demo=document.getElementById('demoBtn'); if(demo)demo.onclick=()=>{seedDemo();};
   const wipe=document.getElementById('wipeBtn'); if(wipe)wipe.onclick=()=>{if(confirm('Удалить все операции, отчёты и выписку, обнулить остатки? Необратимо.')){state.tx=[];state.reports=[];state.bank=[];ACCOUNTS.forEach(a=>state.settings.openings[a]=0);save();renderAll();}};
 }
@@ -504,6 +545,7 @@ function bindOpsForm(){
 /* ===================== ЗАРПЛАТЫ ===================== */
 function renderSalary(){
   const m=metrics(); const d=derived(m); const total=m.fot;
+  const rulesCard=renderRulesCard(m);
   const ent=Object.entries(m.byStaff).sort((a,b)=>b[1]-a[1]);
   const staffRows=ent.length?ent.map(([cat,pay])=>{
     const nm=cat.replace(/^ЗП\s*/i,''); const roleM=nm.match(/\(([^)]+)\)/); const role=roleM?roleM[1]:'сотрудник'; const name=nm.replace(/\s*\([^)]+\)/,'').trim()||nm;
@@ -528,10 +570,98 @@ function renderSalary(){
           <div class="kpi" style="border-radius:20px;padding:20px"><div style="font-size:12.5px;color:#8a7d72;font-weight:600">Статей ЗП</div><div class="disp" style="font-size:28px;font-weight:700;margin-top:6px">${ent.length}</div></div>
           <div class="kpi" style="border-radius:20px;padding:20px"><div style="font-size:12.5px;color:#8a7d72;font-weight:600">Выручка периода</div><div class="disp" style="font-size:23px;font-weight:700;margin-top:6px">${money(m.rev)}</div></div></div>
       </div>
-      <div class="card"><div style="display:flex;align-items:center;margin-bottom:6px"><span class="ttl">Зарплата по сотрудникам</span><div style="flex:1"></div><span class="msg">от большего к меньшему</span></div>
+      <div class="card"><div style="display:flex;align-items:center;margin-bottom:6px"><span class="ttl">Зарплата по сотрудникам</span><div style="flex:1"></div><span class="msg">по факту, от большего</span></div>
         ${staffRows}
         <div style="display:flex;align-items:center;justify-content:space-between;padding-top:16px;font-size:14px"><span style="color:#8a7d72;font-weight:600">Итого ФОТ</span><span class="disp" style="font-size:19px;font-weight:700">${money(total)}</span></div></div>
-    </div></div>`;
+    </div>
+    ${rulesCard}
+    </div>`;
+  bindSalary();
+}
+/* --- правила авто-начисления ЗП + ручная выплата ФОТ --- */
+function renderRulesCard(m){
+  const rules=state.settings.staffRules||[];
+  const baseList=[['revenue','вся выручка'],['services','услуги салона'],['cosmetics','продажа косметики'],['profit','чистая прибыль (период)']].concat((INCOME||[]).filter(c=>c&&c!=='Без статьи').map(c=>['cat:'+c,'статья: '+c]));
+  const baseSel=(i,val)=>`<select data-rf="base" data-ri="${i}" class="inp" style="padding:8px 9px;font-size:12.5px;margin-top:4px">${baseList.map(([k,l])=>`<option value="${esc(k)}" ${val===k?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
+  const accSel=(i,val)=>`<select data-rf="account" data-ri="${i}" class="inp" style="padding:8px 9px;font-size:12.5px;margin-top:4px">${ACCOUNTS.map(a=>`<option ${val===a?'selected':''}>${esc(a)}</option>`).join('')}</select>`;
+  const paidFor=cat=>m.exp.filter(t=>t.cat===cat).reduce((a,t)=>a+t.amount,0);
+  const rows=rules.length?rules.map((rule,i)=>{
+    const rAmt=ruleAmount(rule,m); const paid=paidFor(ruleCat(rule)); const rem=Math.max(0,Math.round(rAmt-paid));
+    return `<div style="border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:13px;margin-bottom:11px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:2;min-width:120px"><label class="msg">Сотрудник</label><input data-rf="name" data-ri="${i}" value="${esc(rule.name||'')}" class="inp" style="padding:8px 10px;font-size:13px;margin-top:4px" placeholder="Имя"></div>
+        <div style="flex:1.4;min-width:90px"><label class="msg">Роль</label><input data-rf="role" data-ri="${i}" value="${esc(rule.role||'')}" class="inp" style="padding:8px 10px;font-size:13px;margin-top:4px" placeholder="мастер"></div>
+        <div style="flex:1.7;min-width:130px"><label class="msg">База %</label>${baseSel(i,rule.base||'revenue')}</div>
+        <div style="flex:1;min-width:88px"><label class="msg">Тип</label><select data-rf="mode" data-ri="${i}" class="inp" style="padding:8px 9px;font-size:12.5px;margin-top:4px"><option value="percent" ${rule.mode!=='fixed'?'selected':''}>процент</option><option value="fixed" ${rule.mode==='fixed'?'selected':''}>фикс</option></select></div>
+        ${rule.mode==='fixed'
+          ?`<div style="flex:1;min-width:84px"><label class="msg">Сумма</label><input data-rf="fixed" data-ri="${i}" value="${rule.fixed||''}" inputmode="decimal" class="inp" style="padding:8px 10px;font-size:13px;margin-top:4px" placeholder="0"></div>`
+          :`<div style="flex:.7;min-width:62px"><label class="msg">%</label><input data-rf="percent" data-ri="${i}" value="${rule.percent||''}" inputmode="decimal" class="inp" style="padding:8px 10px;font-size:13px;margin-top:4px" placeholder="0"></div>`}
+        <div style="flex:1.3;min-width:110px"><label class="msg">Счёт выплаты</label>${accSel(i,rule.account)}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:14px;margin-top:11px;flex-wrap:wrap;font-size:13px">
+        <span class="msg">${rule.mode==='fixed'?'фикс. сумма':(((+rule.percent||0))+'% × '+baseLabel(rule.base))}</span>
+        <span>По правилу: <b style="color:#46e08a">${money(rAmt)}</b></span>
+        <span>Выплачено: <b style="color:#f4ede7">${money(paid)}</b></span>
+        <span>Осталось: <b style="color:${rem>0?'#ffb27a':'#8a7d72'}">${money(rem)}</b></span>
+        <div style="flex:1"></div>
+        <button class="gbtn" data-accrue="${i}" ${rem<=0?'disabled style="opacity:.45;padding:8px 13px"':'style="padding:8px 13px;border-color:rgba(70,224,138,.4);color:#46e08a"'}>${rem>0?('Начислить '+money(rem)):'Выплачено'}</button>
+        <button class="delx" data-delrule="${i}" style="width:30px;height:30px;font-size:16px">×</button>
+      </div></div>`;}).join(''):`<div class="msg" style="padding:10px 0 14px">Правил пока нет. Добавь сотрудника или нажми «Из статей ЗП», чтобы создать правила из уже импортированных выплат.</div>`;
+  const totalRule=rules.reduce((a,r)=>a+ruleAmount(r,m),0);
+  const payCats=EXPENSE.filter(isPayroll); const manCats=(payCats.length?payCats:EXPENSE);
+  const today=new Date().toISOString().slice(0,10);
+  const manForm=`<div style="border-top:1px solid rgba(255,255,255,.06);margin-top:8px;padding-top:14px">
+    <div style="font-size:14px;font-weight:700;margin-bottom:10px">Ручная выплата ЗП (ФОТ)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div style="flex:1.4;min-width:130px"><label class="msg">Статья (ЗП…)</label><select id="man_cat" class="inp" style="padding:9px 10px;font-size:13px;margin-top:4px">${manCats.map(c=>`<option>${esc(c)}</option>`).join('')}<option value="__new">+ новая статья…</option></select></div>
+      <div style="flex:1.2;min-width:120px"><label class="msg">…или новая</label><input id="man_catNew" class="inp" style="padding:9px 10px;font-size:13px;margin-top:4px" placeholder="ЗП Имя"></div>
+      <div style="flex:1;min-width:90px"><label class="msg">Сумма</label><input id="man_amt" inputmode="decimal" class="inp disp" style="padding:9px 10px;font-size:15px;font-weight:700;margin-top:4px" placeholder="0"></div>
+      <div style="flex:1.1;min-width:100px"><label class="msg">Счёт</label><select id="man_acc" class="inp" style="padding:9px 10px;font-size:13px;margin-top:4px">${ACCOUNTS.map(a=>`<option>${esc(a)}</option>`).join('')}</select></div>
+      <div style="flex:1;min-width:120px"><label class="msg">Дата</label><input type="date" id="man_date" value="${today}" class="inp" style="padding:9px 10px;font-size:13px;margin-top:4px"></div>
+      <button class="obtn" id="man_add" style="padding:11px 18px">Провести выплату</button>
+    </div>
+    <input id="man_note" class="inp" style="margin-top:10px;padding:9px 11px;font-size:13px" placeholder="Комментарий (необязательно)">
+    <span class="msg" id="man_msg"></span></div>`;
+  return `<div class="card" style="margin-top:18px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px"><span class="ttl">Правила начисления ЗП</span><span class="msg">% автоматически по каждому сотруднику · по правилам за период: <b style="color:#46e08a">${money(totalRule)}</b></span><div style="flex:1"></div>
+      <button class="gbtn" id="scaffoldRules" style="padding:8px 13px">Из статей ЗП</button><button class="obtn" id="addRule" style="padding:9px 15px">+ Сотрудник</button></div>
+    <div class="sub" style="margin-bottom:14px">Для каждого задаёшь базу (вся выручка / услуги / косметика / статья / фикс) и процент — пульт считает сумму за выбранный период. «Начислить» создаёт расход‑ФОТ на остаток.</div>
+    ${rows}
+    ${manForm}</div>`;
+}
+function bindSalary(){
+  const root=document.getElementById('view-salary'); if(!root)return;
+  root.querySelectorAll('[data-rf]').forEach(el=>el.onchange=e=>{const i=+e.target.dataset.ri; const f=e.target.dataset.rf; const r=state.settings.staffRules[i]; if(!r)return; let v=e.target.value; if(f==='percent'||f==='fixed')v=cleanNum(v)||0; r[f]=v; save(); renderSalary();});
+  root.querySelectorAll('[data-accrue]').forEach(b=>{if(!b.disabled)b.onclick=()=>accrueRule(+b.dataset.accrue);});
+  root.querySelectorAll('[data-delrule]').forEach(b=>b.onclick=()=>{state.settings.staffRules.splice(+b.dataset.delrule,1);save();renderSalary();});
+  const ar=document.getElementById('addRule'); if(ar)ar.onclick=()=>{state.settings.staffRules.push({id:uid('s'),name:'',role:'',mode:'percent',percent:0,base:'services',account:(ACCOUNTS.find(a=>/налич|касс|нал/i.test(a))||ACCOUNTS[0])});save();renderSalary();};
+  const sc=document.getElementById('scaffoldRules'); if(sc)sc.onclick=scaffoldRules;
+  const ma=document.getElementById('man_add'); if(ma)ma.onclick=manualPay;
+}
+function accrueRule(i){
+  const rule=state.settings.staffRules[i]; if(!rule)return; const mm=metrics();
+  const rAmt=ruleAmount(rule,mm); const paid=mm.exp.filter(t=>t.cat===ruleCat(rule)).reduce((a,t)=>a+t.amount,0);
+  const rem=Math.round(Math.max(0,rAmt-paid)); if(rem<=0)return;
+  const date=new Date().toISOString().slice(0,10); const cat=ruleCat(rule);
+  if(!EXPENSE.includes(cat)){state.settings.expenseCats.push(cat);syncRefs();}
+  state.tx.push({id:uid('t'),type:'expense',date,amount:rem,cat,account:rule.account||ACCOUNTS[0],note:'Начисление ЗП по правилу ('+baseLabel(rule.base)+', '+(rule.mode==='fixed'?'фикс':(+rule.percent||0)+'%')+')'});
+  save(); renderAll();
+}
+function scaffoldRules(){
+  const m=metrics(); const existing=new Set((state.settings.staffRules||[]).map(r=>ruleCat(r)));
+  const defAcc=ACCOUNTS.find(a=>/налич|касс|нал/i.test(a))||ACCOUNTS[0];
+  Object.keys(m.byStaff).forEach(cat=>{ if(existing.has(cat))return; const nm=cat.replace(/^ЗП\s*/i,''); const roleM=nm.match(/\(([^)]+)\)/); const role=roleM?roleM[1]:''; const name=nm.replace(/\s*\([^)]+\)/,'').trim()||nm; state.settings.staffRules.push({id:uid('s'),name,role,cat,mode:'percent',percent:0,base:'services',account:defAcc}); });
+  save(); renderSalary();
+}
+function manualPay(){
+  const v=id=>document.getElementById(id);
+  const amount=cleanNum(v('man_amt').value); if(!amount){const mm=v('man_msg');if(mm)mm.textContent=' Введи сумму.';return;}
+  const date=v('man_date').value||new Date().toISOString().slice(0,10);
+  let cat=v('man_cat').value; const nw=(v('man_catNew').value||'').trim(); if(cat==='__new'||nw)cat=nw||cat;
+  if(!cat||cat==='__new'){const mm=v('man_msg');if(mm)mm.textContent=' Укажи статью.';return;}
+  if(!EXPENSE.includes(cat)){state.settings.expenseCats.push(cat);syncRefs();}
+  state.tx.push({id:uid('t'),type:'expense',date,amount:Math.abs(amount),cat,account:v('man_acc').value,note:(v('man_note').value||'Выплата ЗП').trim()});
+  save(); renderAll();
 }
 
 /* ===================== СВЕРКА ===================== */
@@ -630,6 +760,99 @@ function renderCfo(){
         <div style="width:${expPct}%;background:linear-gradient(90deg,#e05f3a,#9a5d2a);display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:800;color:#fff">Расходы ${expPct}%</div>
         <div style="flex:1;background:linear-gradient(90deg,#1f8f56,#46e08a);display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:800;color:#062a17">Прибыль ${m.rev?pct(Math.max(0,d.margin)):'—'}</div></div>
       <div class="gridcols" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px 32px;margin-top:22px">${structBars(m.byExp,EXP_PAL,{limit:9,amount:false})}</div></div></div>`;
+}
+
+/* ===================== ОТЧЁТЫ ===================== */
+function miniBars(series,color){
+  const max=Math.max(1,...series.map(s=>s.v));
+  return `<div style="display:flex;align-items:flex-end;gap:5px;height:120px">`+series.map(s=>`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%;justify-content:flex-end" title="${esc(s.label)}: ${money(s.v)}">
+    <div style="width:70%;border-radius:5px 5px 2px 2px;background:${color};height:${(s.v/max)*100}%;min-height:${s.v>0?4:0}px"></div>
+    <span style="font-size:10.5px;color:#8a7d72">${esc(s.label)}</span></div>`).join('')+`</div>`;
+}
+function encPeriodLabel(){ if(encRange==='custom')return (encFrom||encTo)?`${fmtDM(encFrom)} – ${fmtDM(encTo)}`:'свой период'; const o={"all":"всё время","12":"12 мес","6":"6 мес","3":"3 мес","month":"текущий месяц"}; return o[encRange]||encRange; }
+function renderReports(){
+  const m=metrics();
+  /* ---- блок ИНКАССАЦИЯ (свой период) ---- */
+  const encPred=mkPred(encRange,encFrom,encTo);
+  const encM=computeMetrics(encPred);
+  const encOps=state.tx.filter(t=>isEncash(t.cat)&&encPred(t.date)).sort((a,b)=>b.date.localeCompare(a.date));
+  const encShare=encM.net>0?encM.encash/encM.net:0;
+  const encOpts=[['all','всё время'],['12','12 мес'],['6','6 мес'],['3','3 мес'],['month','текущий месяц'],['custom','свой период…']];
+  const encSel=`<select id="encRangeSel" class="inp" style="width:auto;padding:7px 10px;font-size:12.5px">${encOpts.map(([k,l])=>`<option value="${k}" ${encRange===k?'selected':''}>${l}</option>`).join('')}</select>`;
+  const encCustom=encRange==='custom'?`<input type="date" id="encFromI" value="${encFrom}" class="inp" style="width:auto;padding:7px 9px;font-size:12.5px"><span class="msg">–</span><input type="date" id="encToI" value="${encTo}" class="inp" style="width:auto;padding:7px 9px;font-size:12.5px">`:'';
+  const encKpi=(t,v,c,sub)=>`<div class="kpi"><div style="font-size:12.5px;color:#8a7d72;font-weight:600">${t}</div><div class="disp" style="font-size:24px;font-weight:700;margin-top:6px;${c?'color:'+c:''}">${v}</div>${sub?`<div style="font-size:11.5px;color:#8a7d72;margin-top:5px">${sub}</div>`:''}</div>`;
+  const encRows=encOps.length?encOps.slice(0,200).map(t=>`<div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.045)">
+      <div style="width:40px;height:40px;flex:none;border-radius:12px;background:rgba(255,178,122,.16);color:#ffb27a;display:flex;align-items:center;justify-content:center;font-weight:800">⤓</div>
+      <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700">${esc(t.cat)}</div><div style="font-size:12px;color:#8a7d72">${t.date.slice(8,10)}.${t.date.slice(5,7)}.${t.date.slice(0,4)} · ${esc(t.account||'')}${t.note?(' · '+esc(t.note)):''}</div></div>
+      <div style="font-weight:800;color:${t.type==='income'?'#46e08a':'#ffb27a'}">${t.type==='income'?'+':'−'}${money(t.amount).replace('−','')}</div>
+      <button class="delx" data-del="${t.id}" style="width:26px;height:26px;font-size:15px">×</button></div>`).join(''):`<div style="color:#6f6359;padding:18px 0;text-align:center">Нет операций инкассации за этот период.</div>`;
+  const encBlock=`<div class="card">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px"><span class="ttl">Инкассация · вывод средств</span><span class="msg">период:</span>${encSel}${encCustom}<div style="flex:1"></div><span class="msg">${encOps.length} опер. · ${encPeriodLabel()}</span></div>
+    <div class="gridcols" style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:8px">
+      ${encKpi('Выведено (инкассация)',money(encM.encash),'#ffb27a','деньги, снятые с оборота')}
+      ${encKpi('Заработано (чистыми)',money(encM.net),encM.net>=0?'#46e08a':'#ff6b5e','прибыль за тот же период')}
+      ${encKpi('Поступило всего',money(encM.rev),null,'выручка за период')}
+      ${encKpi('Вывели от прибыли',encM.net>0?pct(encShare):'—',encShare>1?'#ff6b5e':'#c4b6aa','сколько прибыли изъято')}
+    </div>
+    <div style="margin-top:6px">${encRows}</div></div>`;
+
+  /* ---- список статей (период дашборда) ---- */
+  const incEnt=Object.entries(m.byInc).filter(e=>e[1]>0).sort((a,b)=>b[1]-a[1]);
+  const expEnt=Object.entries(m.byExp).filter(e=>e[1]>0).sort((a,b)=>b[1]-a[1]);
+  const catRow=(name,val,total,type,pal,i)=>{const p=total?Math.round(val/total*100):0; const col=pal[i%pal.length]; const on=reportCat===name&&reportType===type;
+    return `<button data-cat="${esc(name)}" data-cattype="${type}" style="width:100%;text-align:left;border:1px solid ${on?col:'rgba(255,255,255,.06)'};background:${on?col+'1a':'rgba(255,255,255,.02)'};border-radius:12px;padding:11px 13px;margin-bottom:8px;cursor:pointer;transition:.15s">
+      <div style="display:flex;align-items:center;font-size:13.5px"><span style="width:9px;height:9px;border-radius:50%;background:${col};margin-right:9px;flex:none"></span><span style="font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span><span style="color:#c4b6aa;margin-left:8px">${money(val)}</span><span style="color:#6f6359;font-size:12px;margin-left:8px">${p}%</span></div></button>`;};
+  const incList=incEnt.length?incEnt.map(([n,v],i)=>catRow(n,v,m.rev,'income',INC_PAL,i)).join(''):'<div class="msg" style="padding:8px 0">Нет доходов за период.</div>';
+  const expList=expEnt.length?expEnt.map(([n,v],i)=>catRow(n,v,m.spend,'expense',EXP_PAL,i)).join(''):'<div class="msg" style="padding:8px 0">Нет расходов за период.</div>';
+
+  /* ---- drill-down выбранной статьи ---- */
+  let detail;
+  if(reportCat){
+    const type=reportType;
+    const ops=state.tx.filter(t=>t.type===type&&t.cat===reportCat&&dateInPeriod(t.date)).sort((a,b)=>b.date.localeCompare(a.date));
+    const total=ops.reduce((a,o)=>a+o.amount,0); const cnt=ops.length; const avg=cnt?total/cnt:0;
+    const sideTotal=type==='income'?m.rev:m.spend; const share=sideTotal?total/sideTotal:0;
+    const months=periodMonths(); const series=months.map(mo=>({label:monthShort(mo),v:ops.filter(o=>ym(o.date)===mo).reduce((a,o)=>a+o.amount,0)}));
+    const byAcc={}; ops.forEach(o=>byAcc[o.account]=(byAcc[o.account]||0)+o.amount);
+    const col=type==='income'?'#46e08a':'#ff9a52';
+    const opRows=ops.slice(0,300).map(o=>`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04)">
+        <div style="color:#c4b6aa;font-size:13px;width:74px;flex:none">${o.date.slice(8,10)}.${o.date.slice(5,7)}.${o.date.slice(2,4)}</div>
+        <div style="color:#c4b6aa;font-size:13px;width:120px;flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.account||'')}</div>
+        <div style="flex:1;min-width:0;color:#8a7d72;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(o.note||'')}</div>
+        <div style="font-weight:800;color:${col}">${type==='income'?'+':'−'}${money(o.amount).replace('−','')}</div>
+        <button class="delx" data-del="${o.id}" style="width:26px;height:26px;font-size:15px">×</button></div>`).join('');
+    detail=`<div class="card">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px"><span style="width:11px;height:11px;border-radius:50%;background:${col};flex:none"></span><span class="ttl">${esc(reportCat)}</span><span style="font-size:12px;font-weight:700;color:${col};background:${col}1f;padding:4px 10px;border-radius:8px">${type==='income'?'доход':'расход'}</span><div style="flex:1"></div><span class="msg">${periodLabel()}</span></div>
+      <div class="gridcols" style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:14px 0">
+        ${encKpi('Оборот за период',money(total),col)}
+        ${encKpi('Операций',cnt,null,'средняя '+money(avg))}
+        ${encKpi(type==='income'?'Доля в доходах':'Доля в расходах',sideTotal?pct(share):'—')}
+        ${encKpi('Счетов задействовано',Object.keys(byAcc).length)}
+      </div>
+      <div class="gridcols" style="display:grid;grid-template-columns:1.4fr 1fr;gap:18px;align-items:start">
+        <div><div class="msg" style="margin-bottom:8px">Помесячно</div>${miniBars(series,col)}</div>
+        <div><div class="msg" style="margin-bottom:10px">По счетам</div>${structBars(byAcc,type==='income'?INC_PAL:EXP_PAL,{limit:6})}</div>
+      </div>
+      <div class="ttl" style="font-size:14px;margin:18px 0 6px">Операции (${cnt})</div>${opRows||'<div class="msg">Нет операций.</div>'}</div>`;
+  } else {
+    detail=`<div class="card" style="display:flex;align-items:center;justify-content:center;min-height:220px;color:#6f6359;text-align:center"><div>Выбери статью слева, чтобы увидеть отчёт:<br>обороты, помесячный график, разбивку по счетам и список операций.</div></div>`;
+  }
+
+  document.getElementById('view-reports').innerHTML=`<div>
+    <div style="margin-bottom:18px"><div class="h1">Отчёты</div><div class="sub">Инкассация и детальные отчёты по каждой статье дохода/расхода · период дашборда: ${periodLabel()}</div></div>
+    ${encBlock}
+    <div class="gridcols" style="display:grid;grid-template-columns:.85fr 1.4fr;gap:18px;align-items:start;margin-top:18px">
+      <div class="card"><div class="ttl" style="margin-bottom:4px">Статьи за период</div><div class="sub" style="margin-bottom:14px">Клик по статье — подробный отчёт</div>
+        <div style="font-size:12px;color:#46e08a;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:9px">Доходы</div>${incList}
+        <div style="font-size:12px;color:#ff8a5c;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin:14px 0 9px">Расходы</div>${expList}</div>
+      ${detail}
+    </div></div>`;
+  bindReports();
+}
+function bindReports(){
+  const es=document.getElementById('encRangeSel'); if(es)es.onchange=e=>{encRange=e.target.value; if(encRange==='custom'&&!encFrom){const dc=defaultCustom();encFrom=dc.from;encTo=dc.to;} renderReports();};
+  const ef=document.getElementById('encFromI'); if(ef)ef.onchange=e=>{encFrom=e.target.value;renderReports();};
+  const et=document.getElementById('encToI'); if(et)et.onchange=e=>{encTo=e.target.value;renderReports();};
 }
 
 /* ===================== НАСТРОЙКИ ===================== */
@@ -740,6 +963,18 @@ function parseBank(text){let ok=0,bad=0; text.split('\n').map(l=>l.trim()).filte
 /* ===================== импорт Excel/CSV с маппингом ===================== */
 let importGrid=null;
 function splitLine(line){const d=line.includes(';')?';':(line.includes('\t')?'\t':','); return line.split(d).map(x=>x.trim().replace(/^"|"$/g,''));}
+/* настоящий CSV-парсер: уважает кавычки, экранированные "" и переносы строк внутри полей */
+function parseCSV(text){
+  text=text.replace(/^﻿/,''); const nl=text.indexOf('\n'); const head=nl>=0?text.slice(0,nl):text;
+  const delim=head.includes(';')?';':(head.includes('\t')?'\t':',');
+  const rows=[]; let row=[], field='', q=false; const n=text.length;
+  for(let i=0;i<n;i++){const ch=text[i];
+    if(q){ if(ch==='"'){ if(text[i+1]==='"'){field+='"';i++;} else q=false; } else field+=ch; }
+    else { if(ch==='"')q=true; else if(ch===delim){row.push(field);field='';} else if(ch==='\n'){row.push(field);rows.push(row);row=[];field='';} else if(ch!=='\r')field+=ch; }
+  }
+  if(field!==''||row.length){row.push(field);rows.push(row);}
+  return rows.map(r=>r.map(x=>x.trim()));
+}
 function cellToStr(x){ if(x==null)return ''; if(x instanceof Date && !isNaN(x)){const z=n=>String(n).padStart(2,'0'); const d=new Date(x.getTime()+(x.getTimezoneOffset()*60000)); return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate());} return String(x); }
 function gridFromRows(rows){
   rows=(rows||[]).map(r=>(r||[]).map(cellToStr)).filter(r=>r&&r.some(c=>c.trim()!=='')); if(!rows.length)return {headers:[],rows:[]};
@@ -763,7 +998,7 @@ function readFileToGrid(file,cb){
       const merged=valsD.map((row,i)=>row.map((v,j)=>{ if(v instanceof Date){const ser=(valsN[i]||[])[j]; if(typeof ser==='number'&&typeof XLSX.SSF!=='undefined')return XLSX.SSF.format('yyyy-mm-dd',ser); return cellToStr(v);} return v;}));
       cb(gridFromRows(merged));}catch(e){cb(null,'Не удалось прочитать Excel: '+(e.message||e));}};
     rd.readAsArrayBuffer(file);
-  } else { const rd=new FileReader(); rd.onload=()=>{const rows=String(rd.result).split(/\r?\n/).map(splitLine); cb(gridFromRows(rows));}; rd.readAsText(file); }
+  } else { const rd=new FileReader(); rd.onload=()=>{cb(gridFromRows(parseCSV(String(rd.result))));}; rd.readAsText(file); }
 }
 function fileToTextarea(id){return e=>{const f=e.target.files[0]; if(!f)return; const nm=(f.name||'').toLowerCase();
   if((nm.endsWith('.xlsx')||nm.endsWith('.xls'))&&typeof XLSX!=='undefined'){readFileToGrid(f,(grid,err)=>{const el=document.getElementById(id); if(!el)return; if(err||!grid){el.value='';return;} el.value=grid.rows.map(r=>r.join('; ')).join('\n');});}
@@ -830,6 +1065,77 @@ function startDailyReport(grid){
     syncRefs();save();renderAll();
     box.style.display='none';box.innerHTML='';importGrid=null;
     const mm=document.getElementById('bulkMsg'); if(mm)mm.textContent='Из «Отчёта дня» добавлено '+added+' операций'+(skip?(', пропущено дублей: '+skip):'')+'.';};
+  refresh();
+}
+/* --- импорт «выписки операций»: дата;статья;описание;сумма(со знаком);счёт;валюта --- */
+function ledgerCols(H){
+  const lc=H.map(h=>String(h||'').toLowerCase().trim());
+  const find=(...ws)=>lc.findIndex(h=>ws.some(w=>h.includes(w)));
+  return {date:find('date','дата'), cat:find('category','статья','катег'), desc:find('description','опис','коммент','назнач','примеч'), amount:find('amount','сумма','оборот'), account:find('account','счет','счёт','касса')};
+}
+function isLedger(grid){const c=ledgerCols(grid.headers); if(c.date<0||c.amount<0||c.account<0||c.cat<0)return false;
+  let neg=false,num=0; for(const r of grid.rows.slice(0,50)){const a=cleanNum(r[c.amount]); if(!isNaN(a)&&a!==0){num++; if(a<0)neg=true;}} return num>=3&&neg;}
+function ledgerBuildOps(grid,opt){
+  const c=ledgerCols(grid.headers); const raw=[]; let bad=0;
+  grid.rows.forEach(r=>{const date=parseDate(r[c.date]); if(!date){bad++;return;} const amt=cleanNum(r[c.amount]); if(isNaN(amt)||amt===0){bad++;return;}
+    const cat=(r[c.cat]||'').trim()||'Без статьи'; const acc=(r[c.account]||'').trim()||ACCOUNTS[0]; const note=c.desc>=0?(r[c.desc]||'').trim():'';
+    raw.push({date,amt,cat,acc,note});});
+  const ops=[]; const used=new Set();
+  if(opt.mergeTransfers){
+    raw.forEach((x,i)=>{ if(used.has(i)||!isTransferCat(x.cat)||x.amt>=0)return;
+      const j=raw.findIndex((y,k)=>k!==i&&!used.has(k)&&isTransferCat(y.cat)&&y.date===x.date&&y.amt===-x.amt);
+      if(j>=0){used.add(i);used.add(j); ops.push({type:'transfer',date:x.date,amount:Math.abs(x.amt),from:x.acc,to:raw[j].acc,note:x.note||raw[j].note});}});
+  }
+  raw.forEach((x,i)=>{ if(used.has(i))return; const type=x.amt>=0?'income':'expense'; ops.push({type,date:x.date,amount:Math.abs(x.amt),cat:x.cat,account:x.acc,note:x.note});});
+  return {ops,bad};
+}
+function ledgerFlow(ops){const f={}; ops.forEach(o=>{ if(o.type==='income')f[o.account]=(f[o.account]||0)+o.amount; else if(o.type==='expense')f[o.account]=(f[o.account]||0)-o.amount; else if(o.type==='transfer'){f[o.from]=(f[o.from]||0)-o.amount; f[o.to]=(f[o.to]||0)+o.amount;}}); return f;}
+function guessTarget(acc,flow){const a=(acc||'').toLowerCase(); if(a.includes('терминал'))return 2970000; if(a.includes('нал'))return 24600; if(a.includes('карт'))return 9000; return Math.round(flow);}
+function startLedger(grid){
+  importGrid=grid; const box=document.getElementById('mapBox'); if(!box)return; box.style.display='block';
+  if(!grid.rows.length){box.innerHTML='<div class="msg">В файле не нашлось строк с данными.</div>';return;}
+  const cc=ledgerCols(grid.headers); const accs=[];
+  grid.rows.forEach(r=>{const a=(r[cc.account]||'').trim(); if(a&&!accs.includes(a))accs.push(a);});
+  const v=id=>document.getElementById(id);
+  const chk=id=>{const el=v(id); return el?el.checked:true;};
+  function opt(){return {mergeTransfers:chk('l_merge')};}
+  const flow0=ledgerFlow(ledgerBuildOps(grid,{mergeTransfers:true}).ops);
+  const accRows=accs.map((a,i)=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="flex:1;font-size:13px;font-weight:600">${esc(a)}</span>
+      <span class="msg" style="width:150px;text-align:right">движение ${money(flow0[a]||0)}</span>
+      <input id="lt_${i}" data-acc="${esc(a)}" inputmode="decimal" value="${guessTarget(a,flow0[a]||0)}" class="inp" style="width:150px;padding:8px 10px;font-size:13px;text-align:right" title="реальный остаток сейчас"></div>`).join('');
+  box.innerHTML=`<div class="msg" style="margin-bottom:10px"><b style="color:#f4ede7">Распознана выписка операций: ${grid.rows.length} строк.</b> Инкассация пойдёт отдельной строкой (не в расход). Цифры дохода/расхода совпадут со старым сервисом.</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#c4b6aa;margin-bottom:6px"><input type="checkbox" id="l_merge"> Склеивать «Переводы» в перевод между счетами (чище P&L, но доход/расход станут меньше, чем в старом сервисе)</label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#c4b6aa;margin-bottom:6px"><input type="checkbox" id="l_dedup" checked> Пропускать дубли (если уже импортировал)</label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#c4b6aa;margin-bottom:12px"><input type="checkbox" id="l_open" checked> Подставить стартовые остатки, чтобы итог совпал с реальным остатком ниже</label>
+    <div style="border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:13px;margin-bottom:12px">
+      <div class="msg" style="margin-bottom:10px">Реальный остаток сейчас по счетам (из старого сервиса). Пульт посчитает стартовые остатки = реальный − движение:</div>${accRows}</div>
+    <div id="l_preview" class="msg" style="margin-bottom:10px"></div>
+    <div style="display:flex;gap:10px;align-items:center"><button class="obtn" id="l_import" style="padding:11px 18px">Импортировать</button><button class="gbtn" id="l_cancel">Отмена</button></div>`;
+  function refresh(){const {ops,bad}=ledgerBuildOps(grid,opt());
+    const incS=ops.filter(o=>o.type==='income'&&!isEncash(o.cat)).reduce((a,o)=>a+o.amount,0);
+    const expS=ops.filter(o=>o.type==='expense'&&!isEncash(o.cat)).reduce((a,o)=>a+o.amount,0);
+    const encS=ops.filter(o=>isEncash(o.cat)).reduce((a,o)=>a+(o.type==='expense'?o.amount:-o.amount),0);
+    const trN=ops.filter(o=>o.type==='transfer').length;
+    v('l_preview').innerHTML=`Будет создано <b style="color:#f4ede7">${ops.length}</b> операций${bad?` · пропущено ${bad}`:''}.<br>Доход <b style="color:#46e08a">${money(incS)}</b> · расход <b style="color:#ff8a5c">${money(expS)}</b> · инкассация <b style="color:#ffb27a">${money(encS)}</b> · переводов ${trN}.`;
+    v('l_import').textContent='Импортировать '+ops.length+' операций';}
+  v('l_merge').onchange=refresh;
+  v('l_cancel').onclick=()=>{box.style.display='none';box.innerHTML='';importGrid=null;};
+  v('l_import').onclick=()=>{const {ops}=ledgerBuildOps(grid,opt()); const flow=ledgerFlow(ops);
+    const keyOf=t=>t.type==='transfer'?['transfer',t.date,t.from,t.to,Math.round(t.amount)].join('|'):[t.type,t.date,t.cat,t.account,Math.round(t.amount)].join('|');
+    const seen=new Set(state.tx.map(keyOf)); let added=0,skip=0;
+    ops.forEach(o=>{const key=keyOf(o); if(chk('l_dedup')&&seen.has(key)){skip++;return;}
+      if(o.type==='income'){if(!INCOME.includes(o.cat))state.settings.incomeCats.push(o.cat);}
+      else if(o.type==='expense'){if(!EXPENSE.includes(o.cat))state.settings.expenseCats.push(o.cat);}
+      [o.account,o.from,o.to].forEach(a=>{if(a&&!ACCOUNTS.includes(a)){state.settings.accounts.push(a);state.settings.openings[a]=0;}});
+      const tx={id:uid('t'),type:o.type,date:o.date,amount:o.amount,note:o.note};
+      if(o.type==='transfer'){tx.from=o.from;tx.to=o.to;}else{tx.cat=o.cat;tx.account=o.account;}
+      state.tx.push(tx); added++;});
+    syncRefs();
+    if(chk('l_open')){accs.forEach((a,i)=>{const el=v('lt_'+i); const target=cleanNum(el&&el.value); if(!isNaN(target))state.settings.openings[a]=Math.round(target-(flow[a]||0));});}
+    save(); renderAll();
+    box.style.display='none';box.innerHTML='';importGrid=null;
+    const mm=document.getElementById('bulkMsg'); if(mm)mm.textContent='Импортировано '+added+' операций из выписки'+(skip?(', пропущено дублей: '+skip):'')+'.';};
   refresh();
 }
 function startMapping(grid){
@@ -942,7 +1248,7 @@ function renderCustomRange(){
 }
 function renderAll(){
   renderHeaderBits();
-  renderOverview(); renderOps(); renderSalary(); renderRecon(); renderCfo(); renderSettings();
+  renderOverview(); renderOps(); renderSalary(); renderRecon(); renderCfo(); renderReports(); renderSettings();
 }
 function showSec(sec){
   curSec=sec;
@@ -961,6 +1267,7 @@ function bind(){
     const lay=t.closest('[data-layout]'); if(lay){curLayout=+lay.dataset.layout;renderOverview();return;}
     const go=t.closest('[data-go]'); if(go){showSec(go.dataset.go);return;}
     const op=t.closest('[data-optype]'); if(op){curOp=op.dataset.optype;renderOps();return;}
+    const cat=t.closest('[data-cat]'); if(cat){reportCat=cat.dataset.cat; reportType=cat.dataset.cattype||'expense'; if(curSec!=='reports')showSec('reports'); renderReports(); return;}
     const del=t.closest('[data-del]'); if(del){state.tx=state.tx.filter(x=>x.id!==del.dataset.del);save();renderAll();return;}
     const da=t.closest('[data-delacc]'); if(da){if(ACCOUNTS.length<=1)return;const a=da.dataset.delacc;state.settings.accounts=ACCOUNTS.filter(x=>x!==a);delete state.settings.openings[a];syncRefs();save();renderAll();return;}
     const di=t.closest('[data-delinc]'); if(di){state.settings.incomeCats=INCOME.filter(x=>x!==di.dataset.delinc);syncRefs();save();renderAll();return;}
