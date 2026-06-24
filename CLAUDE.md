@@ -27,13 +27,14 @@
 
 ## Модель данных (`state`)
 - `settings`: `salonName, currency(RUB/USD/EUR/ARS), accounts[], incomeCats[], expenseCats[], openings{счёт:остаток}, encashCats[], staffRules[], avgCheck, clients, taxRate(%)`.
-- `tx[]`: `{id,type:'income'|'expense'|'transfer',date:'YYYY-MM-DD',amount, cat,account, from,to, note}`.
+- `tx[]`: `{id,type:'income'|'expense'|'transfer',date:'YYYY-MM-DD',amount, cat,account, from,to, note, confirmed?}` (`confirmed` — приход подтверждён в сверке вручную).
 - `reports[]`: `{id,date,cash,card,who}` (отчёты персонала). `bank[]`: `{id,date,amount,desc}` (выписка).
 - `staffRules[]`: `{id,name,role,mode:'percent'|'fixed',percent,fixed,base,account,cat}`. `base` ∈ `revenue|services|cosmetics|profit|cat:<статья>`. `ruleAmount()` = база×% или фикс; `accrueRule()` создаёт расход-ФОТ на остаток.
 - Статья на «ЗП» (`isPayroll`) → ФОТ. Статья инкассации (`isEncash`, по `encashCats` или `/инкасс?ац/i`) — **отдельный тип «Выведено», НЕ расход и НЕ прибыль**.
 
 ## Финансовая логика (важно — чтобы цифры сходились со старым сервисом cash)
-- **Прибыль** `net = доход − расход` (инкассация исключена из обоих). **Δ денег** `= net − выведено` = реальное изменение остатка на счетах.
+- **Инкассация — это выведенная владельцу прибыль** (`settings.encashMode`): `draw` (по умолч.) — НЕ расход, прибыль `= доход − расход` уже включает её как заработанное, выводится как «выведено себе»; `expense` — считать обычным расходом (тогда прибыль уменьшается, = Δ денег старого сервиса). Переключатель в Настройках.
+- **Прибыль** `net = доход − расход` (при `draw` инкассация исключена из обоих). «Осталось в бизнесе» `= net − выведено` = реальное изменение остатка на счетах.
 - `metrics()`/`computeMetrics(pred)`: `rev,spend` БЕЗ инкассации; `encash`=выведено; `byExp` без инкассации.
 - Инкассация уменьшает баланс счёта (в `accountBalances` остаётся как expense), но не попадает в P&L.
 - Старый сервис **включает** легитимные «Переводы» между счетами в доход/расход (не схлопывает) и показывает инкассацию отдельной строкой. Поэтому импорт по умолчанию НЕ склеивает переводы (`l_merge` off) — иначе доход/расход занижаются.
@@ -43,7 +44,7 @@
 1. Справочники (DEF_*, палитры) → `state` → `store`/`save`/`load`/`syncRefs`.
 2. Хелперы: `money, pct, ym, uid, parseDate, cleanNum, monthsBack(UTC!), periodMonths, allMonthsRange`.
 3. Метрики: `metrics, monthMetric, accountBalances, totalBalance, cumulativeByMonth, trendBadge, derived`.
-4. `reconcile()` — сверка отчётов с банком (комиссия ≤6%, задержка ≤5 дней).
+4. Сверка с банком (2 режима, `reconMode`): `reconcile()` — отчёты персонала ↔ выписка; `reconcileAccount()` — записанные приходы на выбранный счёт ↔ выписка (комиссия ≤6%, задержка ≤5 дней). Статусы: подтверждено / не подтверждено / лишнее в банке. Кнопка «Подтвердить» ставит `tx.confirmed=true`; «Внести как доход» создаёт `income` из строки выписки.
 5. Билдеры графиков (`capChartHTML, monthlyBarsHTML, structBars, recentOpsHTML`).
 6. Рендер-функции по экранам: `renderOverview(layout 1/2/3), renderOps, renderSalary(+renderRulesCard/bindSalary), renderRecon, renderCfo, renderReports(drill-down статей + блок инкассации со своим периодом `encRange`), renderSettings, renderDb`.
 7. Парсеры/импорт: `parseCSV` (настоящий CSV: кавычки/`""`/переносы строк внутри полей), `parseTxBulk/Reports/Bank`, `readFileToGrid, gridFromRows`, `startMapping` (универсальный), `startDailyReport` («Отчёт дня»), `startLedger` (выписка `дата;статья;описание;сумма;счёт;валюта`).
